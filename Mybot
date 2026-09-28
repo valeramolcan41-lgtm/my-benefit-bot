@@ -1,0 +1,175 @@
+import asyncio
+import logging
+import sqlite3
+import os
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import LabeledPrice, PreCheckoutQuery
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+conn = sqlite3.connect("users.db")
+cur = conn.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    joined TEXT,
+    paid INTEGER DEFAULT 0,
+    refs INTEGER DEFAULT 0
+)""")
+conn.commit()
+
+def add_user(uid, username):
+    cur.execute("INSERT OR IGNORE INTO users (id, username, joined) VALUES (?, ?, datetime('now'))", (uid, username))
+    conn.commit()
+
+def is_paid(uid):
+    cur.execute("SELECT paid FROM users WHERE id=?", (uid,))
+    r = cur.fetchone()
+    return r and r[0] == 1
+
+def set_paid(uid):
+    cur.execute("UPDATE users SET paid=1 WHERE id=?", (uid,))
+    conn.commit()
+
+def add_ref(uid):
+    cur.execute("UPDATE users SET refs = refs + 1 WHERE id=?", (uid,))
+    conn.commit()
+
+def get_stats():
+    cur.execute("SELECT COUNT(*) FROM users")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM users WHERE paid=1")
+    paid = cur.fetchone()[0]
+    return total, paid
+
+def main_menu(uid):
+    paid = is_paid(uid)
+    text = "🤑 <b>Ежедневная выгода</b>\n\n"
+    text += "✅ Премиум активен" if paid else "🔓 Бесплатный доступ"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎁 Промокоды дня", callback_data="promo")
+    kb.button(text="💡 Лайфхак дня", callback_data="lifehack")
+    kb.button(text="🔥 Выгодные акции", callback_data="deals")
+    if not paid:
+        kb.button(text="💎 Премиум — 50 Stars", callback_data="buy")
+    kb.button(text="👥 Пригласить друга", callback_data="ref")
+    kb.adjust(2)
+    return text, kb.as_markup()
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    add_user(message.from_user.id, message.from_user.username or "")
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("ref"):
+        try:
+            inviter = int(args[1].replace("ref", ""))
+            if inviter != message.from_user.id:
+                add_ref(inviter)
+        except ValueError:
+            pass
+    text, kb = main_menu(message.from_user.id)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "promo")
+async def promo(callback: types.CallbackQuery):
+    today = datetime.now().strftime("%d.%m.%Y")
+    text = f"🎁 <b>Промокоды на {today}</b>\n\n"
+    text += "1. <b>OZON10</b> — скидка 10% на первый заказ\n"
+    text += "2. <b>WB15</b> — скидка 15% на всё\n"
+    text += "3. <b>YANDEX300</b> — 300₽ на такси\n\n"
+    text += "💎 <i>Премиум-промокоды (до 50%) — в разделе Премиум</i>"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🛒 Открыть Ozon", url="https://ozon.ru")
+    kb.button(text="🛍 Открыть WB", url="https://wildberries.ru")
+    kb.button(text="⬅️ Назад", callback_data="back")
+    kb.adjust(2)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "lifehack")
+async def lifehack(callback: types.CallbackQuery):
+    text = "💡 <b>Лайфхак дня</b>\n\n"
+    text += "Перед покупкой на маркетплейсе всегда проверяй цену через <b>историю цен</b>. "
+    text += "Часто продавцы завышают цену на 30–50% перед \"скидкой\". Используй сервис PriceHistory."
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="back")
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "deals")
+async def deals(callback: types.CallbackQuery):
+    text = "🔥 <b>Выгодные акции сегодня</b>\n\n"
+    text += "• СберМаркет: -500₽ на первый заказ\n"
+    text += "• Яндекс Еда: -40% на 3 заказа\n"
+    text += "• Аскона: -30% на матрасы\n\n"
+    text += "🔗 Переходи по кнопкам и получай выгоду:"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🛒 СберМаркет", url="https://sbermarket.ru")
+    kb.button(text="🍔 Яндекс Еда", url="https://eda.yandex.ru")
+    kb.button(text="⬅️ Назад", callback_data="back")
+    kb.adjust(2)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "buy")
+async def buy(callback: types.CallbackQuery):
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Премиум доступ",
+        description="Промокоды до 50%, закрытые акции, ранний доступ",
+        payload="premium_access",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Премиум", amount=50)]
+    )
+    await callback.answer()
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def payment(message: types.Message):
+    set_paid(message.from_user.id)
+    await message.answer("✅ Премиум активирован! Теперь тебе доступны промокоды до 50% и закрытые акции.")
+    if ADMIN_ID:
+        await bot.send_message(ADMIN_ID, f"💰 Новая оплата: {message.from_user.id}")
+
+@dp.callback_query(F.data == "ref")
+async def ref(callback: types.CallbackQuery):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref{callback.from_user.id}"
+    text = f"👥 <b>Реферальная программа</b>\n\n"
+    text += f"Твоя ссылка:\n<code>{link}</code>\n\n"
+    text += "За каждого друга — бонусы и бесплатные премиум-дни."
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="back")
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "back")
+async def back(callback: types.CallbackQuery):
+    text, kb = main_menu(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(Command("stats"))
+async def stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    total, paid = get_stats()
+    await message.answer(f"👥 Всего: {total}\n💰 Премиум: {paid}\n💵 Доход: {paid * 50} Stars")
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
